@@ -1,0 +1,7 @@
+---
+aerospike_aws_temp_dir: "{{ lookup('env', 'TMPDIR') | default('/tmp', true) }}/ansible_role_aerospike_aws.temp"
+aerospike_aws_thinknear_aerospike_role_path: "{{ role_path }}/../ThinkNear.aerospike"
+aerospike_aws_base_vars_file: "{{ role_path}}/vars/main.yml"
+aerospike_aws_stacks_directory: "{{ role_path }}/vars"
+aerospike_aws_dynamodb_table_name: libratoCredentials
+aerospike_aws_use_librato: false

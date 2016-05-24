@@ -1,0 +1,47 @@
+---
+- name: Include base vars.
+  include_vars: "{{ aerospike_aws_base_vars_file }}"
+
+- name: Include stack vars.
+  include_vars: "{{ aerospike_aws_stacks_directory }}/{{ item }}.yml"
+
+- name: Create temporary directory.
+  file: path={{ aerospike_aws_temp_dir }} state=directory
+
+- name: Generate configuration file from template.
+  template:
+    src: "{{ aerospike_aws_thinknear_aerospike_role_path }}/templates/aerospike.conf.j2"
+    dest: "{{ aerospike_aws_temp_dir }}/{{ aerospike_aws_s3_path_aerospike_conf | basename }}"
+
+- name: Generate attach eni file from template.
+  template:
+    src: templates/attach_eni.sh.j2
+    dest: "{{ aerospike_aws_temp_dir }}/attach_eni.sh"
+
+- name: Create S3 bucket.
+  s3_bucket: name={{ aerospike_aws_s3_bucket }} tags={{ aerospike_aws_s3_tags }}
+
+- name: Copy configuration file to S3.
+  s3:
+    bucket: "{{ aerospike_aws_s3_bucket }}"
+    object: "{{ aerospike_aws_s3_path_aerospike_conf }}"
+    src: "{{ aerospike_aws_temp_dir }}/{{ aerospike_aws_s3_path_aerospike_conf | basename }}"
+    mode: put
+    overwrite: different
+
+- name: Copy attach eni script.
+  s3:
+    bucket: "{{ aerospike_aws_s3_bucket }}"
+    object: "{{ aersopike_aws_s3_path_eni_attach }}"
+    src: "{{ aerospike_aws_temp_dir }}/attach_eni.sh"
+    mode: put
+    overwrite: different
+
+- name: Cloudformation stack created or updated.
+  cloudformation:
+    stack_name: "{{ aerospike_aws_stack_name }}"
+    state: present
+    region: "{{ aerospike_aws_region }}"
+    template: "{{ aerospike_aws_template }}"
+    template_parameters: "{{ aerospike_aws_template_parameters }}"
+    tags: "{{ aerospike_aws_tags }}"

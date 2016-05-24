@@ -1,0 +1,7 @@
+---
+- name: Include stack variables.
+  include_vars: "{{ aerospike_aws_stacks_directory }}/{{ aerospike_aws_stacks }}.yml"
+
+- name: Process each stack.
+  include: each_stack.yml
+  with_items: "{{ aerospike_aws_included_stacks }}"

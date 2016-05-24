@@ -1,0 +1,114 @@
+#jinja2: lstrip_blocks: True
+#!/bin/bash
+
+STACK_NAME=$1
+SOURCE=$2
+
+INSTANCE_ID=$(curl --silent http://169.254.169.254/latest/meta-data/instance-id/)
+
+NO_CHANGE_MESSAGE="No changes."
+CHANGE_MESSAGE="Attached ENI successfully."
+FAIL_MESSAGE="Failed to attach ENI."
+
+function post_metric {
+    {% if aerospike_aws_use_librato %}
+    local use_librato=true
+    {% else %}
+    local use_librato=false
+    {% endif %}
+
+    if $use_librato; then
+        local librato_token=$(aws dynamodb get-item \
+                                --table-name {{ aerospike_aws_dynamodb_table_name }} \
+                                --key '{ "config_key" : { "S" : "LIBRATO_TOKEN" } }' \
+                                --output text \
+                                --attributes-to-get config_value \
+                                --region us-east-1 | cut -f2
+                            )
+        local librato_user=$(aws dynamodb get-item \
+                               --table-name {{ aerospike_aws_dynamodb_table_name }} \
+                               --key '{ "config_key" : { "S" : "LIBRATO_USER" } }' \
+                               --output text \
+                               --attributes-to-get config_value \
+                               --region us-east-1 | cut -f2
+                           )
+
+        local metric_name=$1
+        curl -g \
+            --silent \
+            -u ${librato_user}:${librato_token} \
+            -d "source=${SOURCE}-${INSTANCE_ID}" \
+            -d "gauges[0][name]=$metric_name" \
+            -d "gauges[0][value]=1" \
+            -X POST \
+            https://metrics-api.librato.com/v1/metrics
+    fi
+}
+
+function select_available_eni {
+    local wait=$(( RANDOM %= 20 ))
+    sleep $wait
+
+    local avail_enis=$(aws ec2 describe-network-interfaces \
+        --filters Name=status,Values=available Name=tag:aws:cloudformation:stack-name,Values=$STACK_NAME \
+        --query 'NetworkInterfaces[*].NetworkInterfaceId' \
+        --output text \
+        --region us-east-1
+    )
+
+    echo $avail_enis | cut -d' ' -f1
+}
+
+function attach_eni {
+    local eni=$1
+    local instance_id=$2
+
+    local attach_eni=$(aws ec2 attach-network-interface \
+        --network-interface-id $eni \
+        --instance-id $instance_id \
+        --device-index 1 \
+        --region us-east-1
+    )
+    if [[ $attach_eni == *AttachmentId* ]]; then
+        post_metric "aerospike.eni.attached"
+        echo true
+    else
+        post_metric "aerospike.eni.failed_to_attach"
+        echo false
+    fi
+}
+
+function has_attached_eni {
+    instance_id=$1
+    local attached_eni_on_1=$(aws ec2 describe-instances \
+        --instance-ids $instance_id \
+        --query 'Reservations[0].Instances[0].NetworkInterfaces[?Attachment.DeviceIndex==`1`].NetworkInterfaceId' \
+        --output text \
+        --region us-east-1
+    )
+
+    if [ -z $attached_eni_on_1 ]; then
+        echo false
+    else
+        echo true
+    fi
+}
+
+if [ `has_attached_eni $INSTANCE_ID` == true ]; then
+    echo "$NO_CHANGE_MESSAGE There is an ENI attached to instance $INSTANCE_ID device index 1"
+else
+    ENI=`select_available_eni`
+    RESULT=`attach_eni $ENI $INSTANCE_ID`
+    if [[ $RESULT == true ]]; then
+        echo "$CHANGE_MESSAGE ENI $ENI to instance $INSTANCE_ID."
+    else
+        echo "Retrying.."
+        ENI=`select_available_eni`
+        RESULT=`attach_eni $ENI $INSTANCE_ID`
+        if [[ $RESULT == true ]]; then
+            echo "$CHANGE_MESSAGE ENI $ENI to instance $INSTANCE_ID."
+        else
+            echo "$FAIL_MESSAGE ENI $ENI to instance $INSTANCE_ID."
+        fi
+    fi
+fi

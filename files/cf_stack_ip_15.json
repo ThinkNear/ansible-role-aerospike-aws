@@ -1,0 +1,505 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+  "Description" : "Aerospike Cluster with SSD Attachment",
+  "Parameters" : {
+
+    "KeyPair" : {
+      "Description" : "Name of the KeyPair (without the .pem extension) that should be used to allow ssh access to the instances",
+      "Type" : "String",
+      "AllowedPattern" : ".+",
+      "ConstraintDescription" : "Please specify the name of the keypair that you use to login"
+    },
+
+    "NumberOfInstances" : {
+      "Description" : "Number of instances in the cluster",
+      "Type" : "Number",
+      "Default" : "10"
+    },
+
+    "AerospikeSubnet" : {
+      "Description" : "VPC subnet placement for cluster's instances",
+      "Type" : "String"
+    },
+
+    "AerospikeAvailabilityZone" : {
+      "Description" : "Zone placement for cluster's instances. Must match zone of subnet.",
+      "Type" : "String"
+    },
+
+    "VpcId" : {
+      "Description" : "VPC id for cluster. The provided subnet must belong to this VPC.",
+      "Type" : "String"
+    },
+
+    "PrivateStaticIPs" : {
+      "Description" : "A list of private static IPs for all nodes. Must belong in CIDR block defined by subnet.",
+      "Type" : "CommaDelimitedList"
+    },
+
+    "ConfigS3Location" : {
+      "Description" : "Bucket + object path for the configuration file of this cluster.",
+      "Type" : "String"
+    },
+
+    "AerospikeAMI" : {
+      "Description" : "AMI id of the aerospike host.",
+      "Type" : "String"
+    },
+
+    "InstanceType" : {
+      "Description" : "Type of EC2 instance to launch. Choose the one which allows HVM AMIs",
+      "Type" : "String",
+      "Default" : "c3.2xlarge",
+      "AllowedValues" : ["t2.micro", "t2.small", "t2.medium", "m3.medium", "m3.large", "m3.xlarge", "m3.2xlarge",
+                         "c3.large", "c3.xlarge",
+                         "c3.2xlarge", "c3.4xlarge", "c3.8xlarge", "r3.large",
+                         "r3.xlarge","r3.2xlarge","r3.4xlarge","r3.8xlarge"
+      ],
+      "ConstraintDescription"  : "Use an instance type which supports linux HVM AMI"
+    },
+
+    "AttachEniS3Location" : {
+      "Description" : "Bucket + object path for the attach eni script for this stack.",
+      "Type" : "String"
+    },
+
+    "MetricSourceName" : {
+      "Description" : "The Librato source name that will prefix the instance id.",
+      "Type" : "String"
+    },
+
+    "HostedZoneName" : {
+      "Description" : "The Route53 zone name where dns records will be setup.",
+      "Type" : "String"
+    },
+
+    "HostedRecordName" : {
+      "Description" : "The Route53 record name for the cluster.",
+      "Type" : "String"
+    }
+  },
+
+  "Resources" : {
+    "ClusterGroup" : {
+      "Type" : "AWS::AutoScaling::AutoScalingGroup",
+      "Properties" : {
+        "LaunchConfigurationName" : { "Ref" : "LaunchConfig" },
+        "DesiredCapacity" : { "Ref" : "NumberOfInstances"},
+        "MinSize" : "1",
+        "MaxSize" : "15",
+        "AvailabilityZones" : [ { "Ref" : "AerospikeAvailabilityZone" } ],
+        "VPCZoneIdentifier" : [ { "Ref" : "AerospikeSubnet" } ],
+        "Tags" : [
+          {"Key" : "StackID", "Value" : { "Ref" : "AWS::StackId"}, "PropagateAtLaunch" : "true" },
+          {"Key" : "Name", "Value" : { "Ref" : "AWS::StackName"}, "PropagateAtLaunch" : "true" }
+        ]
+      }
+    },
+
+    "LaunchConfig" : {
+      "Type" : "AWS::AutoScaling::LaunchConfiguration",
+      "Properties" : {
+        "InstanceType" : { "Ref" : "InstanceType"},
+        "KeyName" : { "Ref" : "KeyPair" },
+        "IamInstanceProfile" : "aerospike",
+        "ImageId" : { "Ref": "AerospikeAMI" },
+        "AssociatePublicIpAddress" : "true",
+        "SecurityGroups" : [ { "Ref" : "InstanceSecurityGroup" } ],
+        "BlockDeviceMappings" : [
+          {
+            "DeviceName" : "/dev/sdb",
+            "VirtualName" : "ephemeral0"
+          },
+          {
+            "DeviceName" : "/dev/sdc",
+            "VirtualName" : "ephemeral1"
+          }
+        ],
+        "UserData" : { "Fn::Base64" : { "Fn::Join" : ["", [
+          "#!/bin/bash\n",
+          "yum update-minimal --security -y\n",
+          "aws s3 cp s3://", { "Ref" : "AttachEniS3Location" }, " /tmp/attach_eni.sh\n",
+          "chmod +x /tmp/attach_eni.sh\n",
+          "/tmp/attach_eni.sh ", { "Ref" : "AWS::StackName" }, " ", { "Ref" : "MetricSourceName" }, "\n",
+          "INSTANCE_ID=$(curl http://169.254.169.254/latest/meta-data/instance-id)\n",
+          "COLLECTD_HOSTNAME=", { "Ref" : "MetricSourceName" }, "-$INSTANCE_ID\n",
+          "sed -i \"s#Hostname.*#Hostname    \\\"$COLLECTD_HOSTNAME\\\"#g\" /etc/collectd.conf\n",
+          "service collectd restart\n",
+          "aws s3 cp s3://", { "Ref" : "ConfigS3Location" }, " /etc/aerospike/aerospike.conf\n",
+          "/etc/init.d/aerospike restart\n",
+          "service monit restart"
+        ] ] }
+        }
+      }
+    },
+
+    "NetworkInterface1" : {
+      "Type" : "AWS::EC2::NetworkInterface",
+      "Properties" : {
+        "Description": "A static aerospike network interface.",
+        "GroupSet" : [ { "Ref" : "InstanceSecurityGroup" }],
+        "PrivateIpAddress": { "Fn::Select" : [ "0", {"Ref" : "PrivateStaticIPs"} ] },
+        "SubnetId": { "Ref" : "AerospikeSubnet" }
+      },
+      "DependsOn": "InstanceSecurityGroup"
+    },
+
+    "NetworkInterface2" : {
+      "Type" : "AWS::EC2::NetworkInterface",
+      "Properties" : {
+        "Description": "A static aerospike network interface.",
+        "GroupSet" : [ { "Ref" : "InstanceSecurityGroup" }],
+        "PrivateIpAddress": { "Fn::Select" : [ "1", {"Ref" : "PrivateStaticIPs"} ] },
+        "SubnetId": { "Ref" : "AerospikeSubnet" }
+      },
+      "DependsOn": "InstanceSecurityGroup"
+    },
+
+    "NetworkInterface3" : {
+      "Type" : "AWS::EC2::NetworkInterface",
+      "Properties" : {
+        "Description": "A static aerospike network interface.",
+        "GroupSet" : [ { "Ref" : "InstanceSecurityGroup" }],
+        "PrivateIpAddress": { "Fn::Select" : [ "2", {"Ref" : "PrivateStaticIPs"} ] },
+        "SubnetId": { "Ref" : "AerospikeSubnet" }
+      },
+      "DependsOn": "InstanceSecurityGroup"
+    },
+
+    "NetworkInterface4" : {
+      "Type" : "AWS::EC2::NetworkInterface",
+      "Properties" : {
+        "Description": "A static aerospike network interface.",
+        "GroupSet" : [ { "Ref" : "InstanceSecurityGroup" }],
+        "PrivateIpAddress": { "Fn::Select" : [ "3", {"Ref" : "PrivateStaticIPs"} ] },
+        "SubnetId": { "Ref" : "AerospikeSubnet" }
+      },
+      "DependsOn": "InstanceSecurityGroup"
+    },
+
+    "NetworkInterface5" : {
+      "Type" : "AWS::EC2::NetworkInterface",
+      "Properties" : {
+        "Description": "A static aerospike network interface.",
+        "GroupSet" : [ { "Ref" : "InstanceSecurityGroup" }],
+        "PrivateIpAddress": { "Fn::Select" : [ "4", {"Ref" : "PrivateStaticIPs"} ] },
+        "SubnetId": { "Ref" : "AerospikeSubnet" }
+      },
+      "DependsOn": "InstanceSecurityGroup"
+    },
+
+    "NetworkInterface6" : {
+      "Type" : "AWS::EC2::NetworkInterface",
+      "Properties" : {
+        "Description": "A static aerospike network interface.",
+        "GroupSet" : [ { "Ref" : "InstanceSecurityGroup" }],
+        "PrivateIpAddress": { "Fn::Select" : [ "5", {"Ref" : "PrivateStaticIPs"} ] },
+        "SubnetId": { "Ref" : "AerospikeSubnet" }
+      },
+      "DependsOn": "InstanceSecurityGroup"
+    },
+
+    "NetworkInterface7" : {
+      "Type" : "AWS::EC2::NetworkInterface",
+      "Properties" : {
+        "Description": "A static aerospike network interface.",
+        "GroupSet" : [ { "Ref" : "InstanceSecurityGroup" }],
+        "PrivateIpAddress": { "Fn::Select" : [ "6", {"Ref" : "PrivateStaticIPs"} ] },
+        "SubnetId": { "Ref" : "AerospikeSubnet" }
+      },
+      "DependsOn": "InstanceSecurityGroup"
+    },
+
+    "NetworkInterface8" : {
+      "Type" : "AWS::EC2::NetworkInterface",
+      "Properties" : {
+        "Description": "A static aerospike network interface.",
+        "GroupSet" : [ { "Ref" : "InstanceSecurityGroup" }],
+        "PrivateIpAddress": { "Fn::Select" : [ "7", {"Ref" : "PrivateStaticIPs"} ] },
+        "SubnetId": { "Ref" : "AerospikeSubnet" }
+      },
+      "DependsOn": "InstanceSecurityGroup"
+    },
+
+    "NetworkInterface9" : {
+      "Type" : "AWS::EC2::NetworkInterface",
+      "Properties" : {
+        "Description": "A static aerospike network interface.",
+        "GroupSet" : [ { "Ref" : "InstanceSecurityGroup" }],
+        "PrivateIpAddress": { "Fn::Select" : [ "8", {"Ref" : "PrivateStaticIPs"} ] },
+        "SubnetId": { "Ref" : "AerospikeSubnet" }
+      },
+      "DependsOn": "InstanceSecurityGroup"
+    },
+
+    "NetworkInterface10" : {
+      "Type" : "AWS::EC2::NetworkInterface",
+      "Properties" : {
+        "Description": "A static aerospike network interface.",
+        "GroupSet" : [ { "Ref" : "InstanceSecurityGroup" }],
+        "PrivateIpAddress": { "Fn::Select" : [ "9", {"Ref" : "PrivateStaticIPs"} ] },
+        "SubnetId": { "Ref" : "AerospikeSubnet" }
+      },
+      "DependsOn": "InstanceSecurityGroup"
+    },
+
+    "NetworkInterface11" : {
+      "Type" : "AWS::EC2::NetworkInterface",
+      "Properties" : {
+        "Description": "A static aerospike network interface.",
+        "GroupSet" : [ { "Ref" : "InstanceSecurityGroup" }],
+        "PrivateIpAddress": { "Fn::Select" : [ "10", {"Ref" : "PrivateStaticIPs"} ] },
+        "SubnetId": { "Ref" : "AerospikeSubnet" }
+      },
+      "DependsOn": "InstanceSecurityGroup"
+    },
+
+    "NetworkInterface12" : {
+      "Type" : "AWS::EC2::NetworkInterface",
+      "Properties" : {
+        "Description": "A static aerospike network interface.",
+        "GroupSet" : [ { "Ref" : "InstanceSecurityGroup" }],
+        "PrivateIpAddress": { "Fn::Select" : [ "11", {"Ref" : "PrivateStaticIPs"} ] },
+        "SubnetId": { "Ref" : "AerospikeSubnet" }
+      },
+      "DependsOn": "InstanceSecurityGroup"
+    },
+
+    "NetworkInterface13" : {
+      "Type" : "AWS::EC2::NetworkInterface",
+      "Properties" : {
+        "Description": "A static aerospike network interface.",
+        "GroupSet" : [ { "Ref" : "InstanceSecurityGroup" }],
+        "PrivateIpAddress": { "Fn::Select" : [ "12", {"Ref" : "PrivateStaticIPs"} ] },
+        "SubnetId": { "Ref" : "AerospikeSubnet" }
+      },
+      "DependsOn": "InstanceSecurityGroup"
+    },
+
+    "NetworkInterface14" : {
+      "Type" : "AWS::EC2::NetworkInterface",
+      "Properties" : {
+        "Description": "A static aerospike network interface.",
+        "GroupSet" : [ { "Ref" : "InstanceSecurityGroup" }],
+        "PrivateIpAddress": { "Fn::Select" : [ "13", {"Ref" : "PrivateStaticIPs"} ] },
+        "SubnetId": { "Ref" : "AerospikeSubnet" }
+      },
+      "DependsOn": "InstanceSecurityGroup"
+    },
+
+    "NetworkInterface15" : {
+      "Type" : "AWS::EC2::NetworkInterface",
+      "Properties" : {
+        "Description": "A static aerospike network interface.",
+        "GroupSet" : [ { "Ref" : "InstanceSecurityGroup" }],
+        "PrivateIpAddress": { "Fn::Select" : [ "14", {"Ref" : "PrivateStaticIPs"} ] },
+        "SubnetId": { "Ref" : "AerospikeSubnet" }
+      },
+      "DependsOn": "InstanceSecurityGroup"
+    },
+    
+    "InstanceSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Enable ports needed by SSH and Aerospike and XDR",
+        "VpcId" : { "Ref" : "VpcId" },
+        "SecurityGroupIngress" : [ {
+                                     "IpProtocol" : "tcp",
+                                     "FromPort" : "22",
+                                     "ToPort" : "22",
+                                     "CidrIp" : "0.0.0.0/0"
+                                   },
+                                   {
+                                     "IpProtocol" : "tcp",
+                                     "FromPort" : "3000",
+                                     "ToPort" : "3004",
+                                     "CidrIp" : "0.0.0.0/0"
+
+                                   },
+                                   {
+                                     "IpProtocol" : "tcp",
+                                     "FromPort" : "8081",
+                                     "ToPort" : "8081",
+                                     "CidrIp" : "0.0.0.0/0"
+
+                                   },
+                                   {
+                                     "IpProtocol" : "icmp",
+                                     "FromPort" : "-1",
+                                     "ToPort" : "-1",
+                                     "CidrIp" : "0.0.0.0/0"
+                                   } ],
+        "Tags" : [ {"Key" : "StackID", "Value" : { "Ref" : "AWS::StackId"} } ]
+      }
+    },
+
+    "DnsRecord" : {
+      "Type" : "AWS::Route53::RecordSet",
+      "Properties" : {
+        "Comment": "Aerospike DNS.",
+        "HostedZoneName" : { "Ref" : "HostedZoneName" },
+        "Name" : {
+          "Fn::Join" : [ ".", [ { "Ref" : "HostedRecordName" }, { "Ref" : "HostedZoneName" }] ]
+        },
+        "Type" : "A",
+        "TTL" : 60,
+        "ResourceRecords" : [
+          { "Fn::GetAtt" : [ "NetworkInterface1", "PrimaryPrivateIpAddress" ] },
+          { "Fn::GetAtt" : [ "NetworkInterface2", "PrimaryPrivateIpAddress" ] },
+          { "Fn::GetAtt" : [ "NetworkInterface3", "PrimaryPrivateIpAddress" ] },
+          { "Fn::GetAtt" : [ "NetworkInterface4", "PrimaryPrivateIpAddress" ] },
+          { "Fn::GetAtt" : [ "NetworkInterface5", "PrimaryPrivateIpAddress" ] },
+          { "Fn::GetAtt" : [ "NetworkInterface6", "PrimaryPrivateIpAddress" ] },
+          { "Fn::GetAtt" : [ "NetworkInterface7", "PrimaryPrivateIpAddress" ] },
+          { "Fn::GetAtt" : [ "NetworkInterface8", "PrimaryPrivateIpAddress" ] },
+          { "Fn::GetAtt" : [ "NetworkInterface9", "PrimaryPrivateIpAddress" ] },
+          { "Fn::GetAtt" : [ "NetworkInterface10", "PrimaryPrivateIpAddress" ] },
+          { "Fn::GetAtt" : [ "NetworkInterface11", "PrimaryPrivateIpAddress" ] },
+          { "Fn::GetAtt" : [ "NetworkInterface12", "PrimaryPrivateIpAddress" ] },
+          { "Fn::GetAtt" : [ "NetworkInterface13", "PrimaryPrivateIpAddress" ] },
+          { "Fn::GetAtt" : [ "NetworkInterface14", "PrimaryPrivateIpAddress" ] },
+          { "Fn::GetAtt" : [ "NetworkInterface15", "PrimaryPrivateIpAddress" ] }
+        ]
+      }
+    }
+  },
+
+  "Outputs" : {
+    "ClusterGroup" : {
+      "Description" : "AutoScalingGroup ID",
+      "Value" :  { "Ref" : "ClusterGroup" }
+    },
+    "InstanceSecurityGroup" : {
+      "Description" : "VPC EC2 security group ID",
+      "Value" :  { "Ref" : "InstanceSecurityGroup" }
+    },
+    "LaunchConfig" : {
+      "Description" : "Launch Config ID",
+      "Value" :  { "Ref" : "LaunchConfig" }
+    },
+    "NetworkInterface1Id" : {
+      "Description" : "ENI 1 ID",
+      "Value" :  { "Ref" : "NetworkInterface1" }
+    },
+    "NetworkInterface1Ip" : {
+      "Description" : "ENI 1 IP",
+      "Value" :  { "Fn::GetAtt" : [ "NetworkInterface1", "PrimaryPrivateIpAddress" ] }
+    },
+    "NetworkInterface2Id" : {
+      "Description" : "ENI 2 ID",
+      "Value" :  { "Ref" : "NetworkInterface2" }
+    },
+    "NetworkInterface2Ip" : {
+      "Description" : "ENI 2 IP",
+      "Value" :  { "Fn::GetAtt" : [ "NetworkInterface2", "PrimaryPrivateIpAddress" ] }
+    },
+    "NetworkInterface3Id" : {
+      "Description" : "ENI 3 ID",
+      "Value" :  { "Ref" : "NetworkInterface3" }
+    },
+    "NetworkInterface3Ip" : {
+      "Description" : "ENI 3 IP",
+      "Value" :  { "Fn::GetAtt" : [ "NetworkInterface3", "PrimaryPrivateIpAddress" ] }
+    },
+    "NetworkInterface4Id" : {
+      "Description" : "ENI 4 ID",
+      "Value" :  { "Ref" : "NetworkInterface4" }
+    },
+    "NetworkInterface4Ip" : {
+      "Description" : "ENI 4 IP",
+      "Value" :  { "Fn::GetAtt" : [ "NetworkInterface4", "PrimaryPrivateIpAddress" ] }
+    },
+    "NetworkInterface5Id" : {
+      "Description" : "ENI 5 ID",
+      "Value" :  { "Ref" : "NetworkInterface5" }
+    },
+    "NetworkInterface5Ip" : {
+      "Description" : "ENI 5 IP",
+      "Value" :  { "Fn::GetAtt" : [ "NetworkInterface5", "PrimaryPrivateIpAddress" ] }
+    },
+    "NetworkInterface6Id" : {
+      "Description" : "ENI 6 ID",
+      "Value" :  { "Ref" : "NetworkInterface6" }
+    },
+    "NetworkInterface6Ip" : {
+      "Description" : "ENI 6 IP",
+      "Value" :  { "Fn::GetAtt" : [ "NetworkInterface6", "PrimaryPrivateIpAddress" ] }
+    },
+    "NetworkInterface7Id" : {
+      "Description" : "ENI 7 ID",
+      "Value" :  { "Ref" : "NetworkInterface7" }
+    },
+    "NetworkInterface7Ip" : {
+      "Description" : "ENI 7 IP",
+      "Value" :  { "Fn::GetAtt" : [ "NetworkInterface7", "PrimaryPrivateIpAddress" ] }
+    },
+    "NetworkInterface8Id" : {
+      "Description" : "ENI 8 ID",
+      "Value" :  { "Ref" : "NetworkInterface8" }
+    },
+    "NetworkInterface8Ip" : {
+      "Description" : "ENI 8 IP",
+      "Value" :  { "Fn::GetAtt" : [ "NetworkInterface8", "PrimaryPrivateIpAddress" ] }
+    },
+    "NetworkInterface9Id" : {
+      "Description" : "ENI 9 ID",
+      "Value" :  { "Ref" : "NetworkInterface9" }
+    },
+    "NetworkInterface9Ip" : {
+      "Description" : "ENI 9 IP",
+      "Value" :  { "Fn::GetAtt" : [ "NetworkInterface9", "PrimaryPrivateIpAddress" ] }
+    },
+    "NetworkInterface10Id" : {
+      "Description" : "ENI 10 ID",
+      "Value" :  { "Ref" : "NetworkInterface10" }
+    },
+    "NetworkInterface10Ip" : {
+      "Description" : "ENI 10 IP",
+      "Value" :  { "Fn::GetAtt" : [ "NetworkInterface10", "PrimaryPrivateIpAddress" ] }
+    },
+    "NetworkInterface11Id" : {
+      "Description" : "ENI 11 ID",
+      "Value" :  { "Ref" : "NetworkInterface11" }
+    },
+    "NetworkInterface11Ip" : {
+      "Description" : "ENI 11 IP",
+      "Value" :  { "Fn::GetAtt" : [ "NetworkInterface11", "PrimaryPrivateIpAddress" ] }
+    },
+    "NetworkInterface12Id" : {
+      "Description" : "ENI 12 ID",
+      "Value" :  { "Ref" : "NetworkInterface12" }
+    },
+    "NetworkInterface12Ip" : {
+      "Description" : "ENI 12 IP",
+      "Value" :  { "Fn::GetAtt" : [ "NetworkInterface12", "PrimaryPrivateIpAddress" ] }
+    },
+    "NetworkInterface13Id" : {
+      "Description" : "ENI 13 ID",
+      "Value" :  { "Ref" : "NetworkInterface13" }
+    },
+    "NetworkInterface13Ip" : {
+      "Description" : "ENI 13 IP",
+      "Value" :  { "Fn::GetAtt" : [ "NetworkInterface13", "PrimaryPrivateIpAddress" ] }
+    },
+    "NetworkInterface14Id" : {
+      "Description" : "ENI 14 ID",
+      "Value" :  { "Ref" : "NetworkInterface14" }
+    },
+    "NetworkInterface14Ip" : {
+      "Description" : "ENI 14 IP",
+      "Value" :  { "Fn::GetAtt" : [ "NetworkInterface14", "PrimaryPrivateIpAddress" ] }
+    },
+    "NetworkInterface15Id" : {
+      "Description" : "ENI 15 ID",
+      "Value" :  { "Ref" : "NetworkInterface15" }
+    },
+    "NetworkInterface15Ip" : {
+      "Description" : "ENI 15 IP",
+      "Value" :  { "Fn::GetAtt" : [ "NetworkInterface15", "PrimaryPrivateIpAddress" ] }
+    },
+    "DnsRecord" : {
+      "Description" : "DNS Record",
+      "Value" :  { "Ref" : "DnsRecord" }
+    }
+  }
+}
