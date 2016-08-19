@@ -76,6 +76,49 @@
     "HostedRecordName" : {
       "Description" : "The Route53 record name for the cluster.",
       "Type" : "String"
+    },
+
+    "SshCidrIp" : {
+      "Description": "The Cidr IP block used as an ingress source for port 22 on the Ec2 instances.",
+      "Default": "",
+      "Type": "String"
+    },
+
+    "SshGroupId" : {
+      "Description": "The EC2-VPC security group id used as an ingress source for port 22 on the Ec2 instances.",
+      "Default": "",
+      "Type": "String"
+    },
+
+    "AsCidrIp" : {
+      "Description": "The Cidr IP block used as an ingress source for Aerospike Service ports on the Ec2 instances.",
+      "Default": "",
+      "Type": "String"
+    },
+
+    "AsGroupId" : {
+      "Description": "The EC2-VPC security group id used as an ingress source for Aerospike Service ports on the Ec2 instances.",
+      "Default": "",
+      "Type": "String"
+    }
+  },
+
+  "Conditions" : {
+    "UseDefaultSshCidrIp" : {
+      "Fn::And": [
+        { "Fn::Equals": [ { "Ref" : "SshCidrIp" }, "" ] },
+        { "Fn::Equals": [ { "Ref" : "SshGroupId" }, "" ] }
+      ]},
+    "UseUserSshCidrIp" : {
+      "Fn::Not" : [ { "Fn::Equals": [ { "Ref" : "SshCidrIp" }, "" ] } ]
+    },
+    "UseDefaultAsCidrIp" : {
+      "Fn::And": [
+        { "Fn::Equals": [ { "Ref" : "AsCidrIp" }, "" ] },
+        { "Fn::Equals": [ { "Ref" : "AsGroupId" }, "" ] }
+    ]},
+    "UseUserAsCidrIp" : {
+      "Fn::Not" : [ { "Fn::Equals": [ { "Ref" : "AsCidrIp" }, "" ] } ]
     }
   },
 
@@ -248,32 +291,92 @@
       "Properties" : {
         "GroupDescription" : "Enable ports needed by SSH and Aerospike and XDR",
         "VpcId" : { "Ref" : "VpcId" },
-        "SecurityGroupIngress" : [ {
-          "IpProtocol" : "tcp",
-          "FromPort" : "22",
-          "ToPort" : "22",
-          "CidrIp" : "0.0.0.0/0"
-        },
+        "SecurityGroupIngress" : [
           {
-            "IpProtocol" : "tcp",
-            "FromPort" : "3000",
-            "ToPort" : "3004",
-            "CidrIp" : "0.0.0.0/0"
-
+            "Fn::If" : [
+              "UseDefaultSshCidrIp",
+              {
+                "IpProtocol" : "tcp",
+                "FromPort" : "22",
+                "ToPort" : "22",
+                "CidrIp" : "0.0.0.0/0"
+              },
+              {
+                "Fn::If" : [
+                  "UseUserSshCidrIp",
+                  {
+                    "IpProtocol" : "tcp",
+                    "FromPort" : "22",
+                    "ToPort" : "22",
+                    "CidrIp" : { "Ref" : "SshCidrIp" }
+                  },
+                  {
+                    "IpProtocol" : "tcp",
+                    "FromPort" : "22",
+                    "ToPort" : "22",
+                    "SourceSecurityGroupId" : { "Ref" : "SshGroupId" }
+                  }
+                ]
+              }
+            ]
           },
           {
-            "IpProtocol" : "tcp",
-            "FromPort" : "8081",
-            "ToPort" : "8081",
-            "CidrIp" : "0.0.0.0/0"
-
+            "Fn::If" : [
+              "UseDefaultAsCidrIp",
+              {
+                "IpProtocol" : "tcp",
+                "FromPort" : "3000",
+                "ToPort" : "3004",
+                "CidrIp" : "0.0.0.0/0"
+              },
+              {
+                "Fn::If" : [
+                  "UseUserAsCidrIp",
+                  {
+                    "IpProtocol" : "tcp",
+                    "FromPort" : "3000",
+                    "ToPort" : "3004",
+                    "CidrIp" : { "Ref" : "AsCidrIp" }
+                  },
+                  {
+                    "IpProtocol" : "tcp",
+                    "FromPort" : "3000",
+                    "ToPort" : "3004",
+                    "SourceSecurityGroupId" : { "Ref" : "AsGroupId" }
+                  }
+                ]
+              }
+            ]
           },
           {
-            "IpProtocol" : "icmp",
-            "FromPort" : "-1",
-            "ToPort" : "-1",
-            "CidrIp" : "0.0.0.0/0"
-          } ],
+            "Fn::If" : [
+              "UseDefaultAsCidrIp",
+              {
+                "IpProtocol" : "icmp",
+                "FromPort" : "-1",
+                "ToPort" : "-1",
+                "CidrIp" : "0.0.0.0/0"
+              },
+              {
+                "Fn::If" : [
+                  "UseUserAsCidrIp",
+                  {
+                    "IpProtocol" : "icmp",
+                    "FromPort" : "-1",
+                    "ToPort" : "-1",
+                    "CidrIp" : { "Ref" : "AsCidrIp" }
+                  },
+                  {
+                    "IpProtocol" : "icmp",
+                    "FromPort" : "-1",
+                    "ToPort" : "-1",
+                    "SourceSecurityGroupId" : { "Ref" : "AsGroupId" }
+                  }
+                ]
+              }
+            ]
+          }
+        ],
         "Tags" : [ {"Key" : "StackID", "Value" : { "Ref" : "AWS::StackId"} } ]
       }
     },
