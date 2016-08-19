@@ -133,6 +133,8 @@ A list of hashes of parameters used with the cloudformation template. See below 
       KeyPair: my_key_pair_name
       AerospikeSubnet: subnet-aaaaaaa
       VpcId: vpc-1234567
+      SshCidrIp: 10.1.0.0/16
+      AsGroupId: sg-1234567
       NumberOfInstances: "{{ aerospike_cluster_size }}"
       PrivateStaticIPs: "{{ aerospike_mesh_seed_addresses | join(',') }}"
       ConfigS3Location: "{{ aerospike_aws_s3_bucket }}/{{ aerospike_aws_s3_path_aerospike_conf }}"
@@ -218,6 +220,8 @@ inventory/group_vars/my_stack.yml:
       KeyPair: my_key_pem
       AerospikeSubnet: subnet-aaaaaaa
       VpcId: vpc-1234567
+      SshCidrIp: 10.1.0.0/16
+      AsGroupId: sg-1234567
       NumberOfInstances: "{{ aerospike_cluster_size }}"
       PrivateStaticIPs: "{{ aerospike_mesh_seed_addresses | join(',') }}"
       ConfigS3Location: "{{ aerospike_aws_s3_bucket }}/{{ aerospike_aws_s3_path_aerospike_conf }}"
