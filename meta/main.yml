@@ -12,7 +12,7 @@ galaxy_info:
   # the ones that apply to your role. If you don't see your
   # platform on this list, let us know and we'll get it added!
   #
-  platforms: []
+  platforms:
   #- name: EL
   #  versions:
   #  - all
@@ -66,11 +66,9 @@ galaxy_info:
   #  versions:
   #  - all
   #  - 2012R2
-  #- name: Amazon
-  #  versions:
-  #  - all
-  #  - 2013.03
-  #  - 2013.09
+  - name: Amazon
+    versions:
+     - all
   #- name: GenericBSD
   #  versions:
   #  - all
